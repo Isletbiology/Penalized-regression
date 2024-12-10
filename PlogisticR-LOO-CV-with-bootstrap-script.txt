@@ -1,0 +1,265 @@
+
+#%*************************************************************************
+#\chapter{Description of data}
+#\section{Data overview}
+#%*************************************************************************
+rm(list=ls())
+set.seed(1983)
+library(hash)
+library(glmnet)
+library(corrplot)
+print(sessionInfo(), l=F)
+
+ori_dat <-  read.table("C:/Users/Documents/Coms/R/data/example-dataset.csv", header=TRUE, sep=",", stringsAsFactors=F, check.names=F, row.names=1)
+
+#ori_dat <- as.data.frame(t(ori_dat), stringsAsFactors=F, check.names=F)
+
+#Following commands to convert the columns that are categorical to factor
+
+str(ori_dat) 
+
+ori_dat[,c(2)] <- factor(ori_dat[,c(2)])
+
+str(ori_dat) 
+
+
+indep_var <- paste("W", 1:61, sep="") #independent variables i.e. there are W1 to W61 independent variables in this example
+dep_var <- "dv"     #dependent variable
+case_grp <- c(1)		#case group
+ctrl_grp <- c(0)		#control group
+cut_pval <- 1			#cut-off of univariate logistic  p-value
+boot_num <- 1000		#number of bootstrap
+boot_loo <- TRUE		#perform LOO-CV in bootstrapping if TRUE, else perform "n_fold" CV if FALSE
+n_fold <- 5			#number of CV fold
+lambda_label <- "min"  		#optimal lambda from CV (min/1se)
+output <- "C:/Users/Documents/Coms/R/data/"
+
+#extract subset of data (case vs control)
+table(ori_dat[dep_var])
+update_dat <- ori_dat[c(dep_var, indep_var)]
+update_dat <- as.data.frame(apply(update_dat, 2, as.numeric))
+update_dat <- subset(update_dat, get(dep_var) %in% c(case_grp, ctrl_grp))
+update_dat[(update_dat[[dep_var]] %in% case_grp), dep_var] <- 1
+update_dat[(update_dat[[dep_var]] %in% ctrl_grp), dep_var] <- 0
+table(update_dat[dep_var])
+
+#data checking
+(dat_dim <- dim(update_dat))
+addmargins(dep_num <- table(update_dat[dep_var], exclude=NULL))
+(num_var <- length(indep_var))
+case_num <- dep_num["1"]
+ctrl_num <- dep_num["0"]
+
+
+#%*************************************************************************
+#\chapter{Non-parametric test}
+#%*************************************************************************
+#Function of statistic of median values
+median_stat <- function(x, type="range", pos=2)	#range/IQR
+{
+  median_val <- round(median(x, na.rm=T), pos)
+  if(type == "range") {
+    stat <- round(range(x, na.rm=T),pos)
+  } else if(type == "IQR") {
+    stat <- round(quantile(x,c(0.25,0.75), na.rm=T), pos)
+  }
+  stat_str <- paste(" (",stat[1],"-",stat[2],")", sep="")
+  result <- paste(median_val, stat_str, sep="")
+  return(result)
+}
+mean_sd <- function(x, pos=2)
+{
+  mean_val <- round(mean(x, na.rm=T) ,pos)
+  sd_val <- round(sd(x, na.rm=T), pos)
+  result <- paste(mean_val, " (", sd_val, ")", sep="")
+  return(result)
+}
+
+#Wilcoxon test and T test
+cmp_stat <- NULL
+for (i in 1:num_var){
+  print(indep_var[i])
+  case_vec <- update_dat[update_dat[[dep_var]]==1, indep_var[i]]
+  ctrl_vec <- update_dat[update_dat[dep_var]==0, indep_var[i]]
+  case_median <- median_stat(case_vec, type="IQR")
+  ctrl_median <- median_stat(ctrl_vec, type="IQR")
+  case_mean <- mean_sd(case_vec)
+  ctrl_mean <- mean_sd(ctrl_vec)
+  formula_str <- paste(indep_var[i], dep_var, sep="~")
+  tryCatch({result_wilcox <- wilcox.test(as.formula(formula_str), update_dat)
+  pval_wilcox <- result_wilcox$p.value}, error=function(e){
+    cat(paste("Error in wilcox for:", indep_var[i],"/n"))
+    pval_wilcox <- NA
+  })
+  tryCatch({result_Ttest <- t.test(as.formula(formula_str), update_dat)
+  pval_Ttest <- result_Ttest$p.value}, error=function(e){
+    cat(paste("Error in T-test for:", indep_var[i],"/n"))
+    pval_Ttest <- NA
+  })
+  cmp_stat <- rbind(cmp_stat, cbind(case_median, ctrl_median, pval_wilcox, case_mean, ctrl_mean, pval_Ttest))
+}
+cmp_stat <- data.frame(cbind(indep_var, cmp_stat), stringsAsFactors=F)
+colnames(cmp_stat) <- c("variable", "median_IQR_case", "median_IQR_ctrl", "pval_wilcoxon", "mean_SD_case", "mean_SD_ctrl", "pval_Ttest")
+head(cmp_stat)
+
+#%*************************************************************************
+#\chapter{Logistic regression analysis}
+#%*************************************************************************
+#We perform univariate logistic regression to examine the
+#association of each independent variable with outcome.
+
+#Function of univariate logistic regression
+logistic_reg <- function(dat, dep_var, indep_var) {
+  fit_label <- TRUE
+  assoc <- data.frame(OR_95CI=NA, pval_logistic=NA, stringsAsFactors=F)
+  formula_str <- paste(dep_var, "~", indep_var, sep="")
+  tryCatch(logit_reg <- glm(as.formula(formula_str), dat, family=binomial("logit")),
+           warning=function(w) {
+             cat(paste("Fitting warning for: ", indep_var, " (", w, ")\n", sep=""))
+             fit_label <<- FALSE},
+           error=function(e){
+             cat(paste("Fitting error for: ", indep_var, " (", e, ")\n", sep=""))
+             fit_label <<- FALSE})
+  if(fit_label && (!is.na(coefficients(logit_reg)[indep_var]))) {
+    coef <- summary(logit_reg)$coefficients
+    assoc$pval_logistic <- coef[indep_var, 4]
+    L95 <- round(exp(coef[indep_var, 1]-1.96*coef[indep_var, 2]), 2)
+    OR <- round(exp(coef[indep_var, 1]), 2)
+    U95 <- round(exp(coef[indep_var, 1]+1.96*coef[indep_var, 2]), 2)
+    assoc$OR_95CI <- paste(OR,"(",L95,"-",U95,")", sep="")
+  }
+  return(assoc)
+}
+
+#logistic association
+uni_assoc <- NULL
+for (i in 1:num_var){
+  print(paste("logistic for:", indep_var[i]), sep="")
+  assoc <- logistic_reg(update_dat, dep_var, indep_var[i])
+  uni_assoc <- rbind(uni_assoc, cbind(assoc))
+}
+sample_size <- paste(case_num, "vs", ctrl_num)
+uni_assoc <- cbind(cmp_stat, uni_assoc, sample_size)
+head(uni_assoc)
+dim(uni_assoc)
+write.table(uni_assoc, paste(output, "Univariate_Association.csv", sep=""), quote=F, sep=",", row.names=F)
+
+
+#%*************************************************************************
+#\chapter{Variable selection with LASSO}
+#%*************************************************************************
+#remove variables with only a few values & filter by p-value of Wilcoxon
+dim(update_dat)
+rm_var <- names(which(apply(update_dat[indep_var], 2, function(x)
+  length(table(x))<=1)))
+rm_var
+length(rm_var)
+
+uni_assoc <- transform(uni_assoc, pval_wilcoxon=as.numeric(pval_wilcoxon))
+filter_assoc <- subset(uni_assoc, pval_wilcoxon>cut_pval)
+head(filter_assoc)
+with(filter_assoc, summary(pval_wilcoxon))
+filter_var <- as.character(filter_assoc$variable)
+rm_var <- unique(c(rm_var, filter_var))
+length(rm_var)
+
+keep_var <- indep_var[!(indep_var %in% rm_var)]
+(num_var <- length(keep_var))
+update_subdat <- update_dat[c(keep_var, dep_var)]
+cc_dat <- as.matrix(update_subdat[complete.cases(update_subdat), ])
+dim(cc_dat)
+
+#LASSO using the full CC data
+if(boot_loo) n_fold <- nrow(cc_dat)
+cvfit <- cv.glmnet(cc_dat[, keep_var], y=cc_dat[, dep_var], alpha=1, nlambda=100, standardize=F, #alpha=1 for lasso
+                   family='binomial', type.measure="mse", nfold=n_fold) #"deviance"
+cvfit
+cvfit$lambda.1se
+cvfit$lambda.min
+coef_min <- as.matrix(coef(cvfit, s = "lambda.min"))
+(select_min <- data.frame(coef_min[coef_min!=0,]))
+(dim(select_min))
+coef_1se <- as.matrix(coef(cvfit, s = "lambda.1se"))
+(select_1se <- data.frame(coef_1se[coef_1se!=0,]))
+(dim(select_1se))
+#cvfit$cvm				#mean CV error
+cvfit$nzero				#number of non-zero coefficients for each lambda
+full_fit <- cvfit$glmnet.fit		#glmnet object for the full data (not CV data)
+full_coef <- coef(full_fit)
+full_coef <- full_coef[-1, ncol(full_coef)]	#remove the intercept from the coefficient matrix
+full_coef <- full_coef[full_coef != 0]		#remove those varialbes with coefficient=0
+
+full_coef_result <- data.frame(full_coef)		#remove those varialbes with coefficient=0
+full_coef_result <- cbind(rownames(full_coef_result), full_coef_result)
+names(full_coef_result) <- c("selected_var", "coefficient")
+write.table(full_coef_result, paste(output, "Selected_Variables_using_entire_data.csv", sep=""), sep=",", row.names=F)
+
+#lambda.1se
+#lambda.min
+select_min
+select_1se
+
+write.csv(select_min,"C:/Users/Documents/Coms/R/data/select_min.csv")
+write.csv(select_1se,"C:/Users/Documents/Coms/R/data/select_1se.csv")
+
+
+#plot variable coefficients vs. shrinkage parameter lambda.
+pdf(paste(output,"Lasso_CV_full_data.pdf"))
+plot(cvfit)
+plot(full_fit, label=F, lwd=4)
+axis(4, at=full_coef, line=-0.5, label=names(full_coef), las=1, tick=F, cex.axis=0.6)
+grid()
+dev.off()
+
+#Bootstrapping + LASSO variable selection
+(case_index <- which(cc_dat[, dep_var] == 1))
+(ctrl_index <- which(cc_dat[, dep_var] == 0))
+size <- nrow(cc_dat)
+select_lambda <- NULL
+var_hash <- hash()
+for(i in 1:boot_num){
+  print(paste("boot:", i))
+  case_bootstrap <- sample(case_index, replace=T)
+  ctrl_bootstrap <- sample(ctrl_index, replace=T)
+  bootstrap <- c(case_bootstrap, ctrl_bootstrap)
+  (uni_ratio <- length(unique(bootstrap))/length(bootstrap))
+  #bootstrap <- bootstrap[!duplicated(bootstrap)]
+  bs_dat <- cc_dat[bootstrap, ]
+  dim(bs_dat)
+  
+  #choose lambda on each bootstrap sample
+  bs_cvfit <- cv.glmnet(bs_dat[, keep_var], y=bs_dat[, dep_var], alpha=1, nlambda=100, #alpha=1 for lasso
+                        family='binomial', type.measure="mse", nfold=n_fold, standardize=F) #"deviance"
+  if(lambda_label == "min") {
+    select_lambda <- c(select_lambda, bs_cvfit$lambda.min)
+    coef_fit <- as.matrix(coef(bs_cvfit, s="lambda.min"))
+  } else if(lambda_label == "1se") {
+    select_lambda <- c(select_lambda, bs_cvfit$lambda.1se)
+    coef_fit <- as.matrix(coef(bs_cvfit, s="lambda.1se"))
+  }
+  (sign_nonzero <- sign(coef_fit[coef_fit!=0, ,drop=F]))
+  select_vars <- rownames(sign_nonzero)
+  for(j in 1:nrow(sign_nonzero)) {
+    var <- select_vars[j]
+    if(!has.key(var, var_hash)){
+      var_hash[var] <- sign_nonzero[j, 1]
+    }else {
+      var_hash[var] <- c(var_hash[[var]], sign_nonzero[j, 1])
+    }
+  }
+}
+stat_nonzero <- lapply(keys(var_hash), FUN=function(x) data.frame(x, table(var_hash[[x]])))
+stat_nonzero <- data.frame(do.call("rbind", stat_nonzero))
+names(stat_nonzero) <- c("variable", "sign", "count")
+stat_nonzero <- transform(stat_nonzero, frequency=round(count/boot_num, 4)*100, opposite=duplicated(variable))
+opp_vars <- stat_nonzero[stat_nonzero$opposite, "variable"]	#variable name with opposite effect direction
+stat_nonzero[stat_nonzero$variable %in% opp_vars, "opposite"] <- TRUE
+stat_nonzero <- stat_nonzero[order(stat_nonzero$frequency, decreasing=T),]	#sorting
+stat_lambda <- median_stat(select_lambda, type="range", pos=4)
+
+write.table(stat_nonzero, paste(output, paste("Lasso_IF_", lambda_label, boot_num,".csv", sep=""), sep=""),
+            quote=F, sep=",", row.names=F)
+save(list=ls(all=TRUE),file=paste(output, "miRNA_Analysis.RData"))
+
+select_min
+select_1se

@@ -1,0 +1,165 @@
+
+#%*************************************************************************
+#\chapter{Description of data}
+#\section{Data overview}
+#%*************************************************************************
+rm(list=ls())
+set.seed(1983)
+library(hash)
+library(glmnet)
+library(corrplot)
+print(sessionInfo(), l=F)
+
+ori_dat <- read.table("C:/Users/Documents/R/data/example-data.csv", header=TRUE, sep=",", stringsAsFactors=F, check.names=F, row.names=1)
+ori_dat <- as.data.frame(t(ori_dat), stringsAsFactors=F, check.names=F)
+indep_var <- paste("V", 1:5795, sep="")
+dep_var <- "dv"			#names of dependent variable
+cut_pval <- 1				#cut-off of univariate linear p-value
+boot_num <- 1000				#number of bootstrap
+boot_loo <- TRUE				#perform LOO-CV in bootstrapping if TRUE, else perform "n_fold" CV if FALSE
+n_fold <- 5					#number of CV fold
+lambda_label <- "min"  				#optimal lambda from CV (min/1se)
+output <- "C:/Users/Documents/R/results"
+
+#data checking
+names(ori_dat)[1:10]
+#names(ori_dat)[length(names(ori_dat))]
+ori_dat[1:10, 1:10]
+(dat_dim <- dim(ori_dat))
+(num_var <- length(indep_var))
+ori_dat <- ori_dat[c(dep_var, indep_var)]
+ori_dat <- as.data.frame(apply(ori_dat, 2, as.numeric))
+summary(ori_dat[dep_var])
+
+
+#%*************************************************************************
+#\chapter{Linear regression analysis}
+#%*************************************************************************
+#We perform univariate linear regression to examine the
+#association of each independent variable with outcome.
+uni_assoc <- data.frame()
+for (i in 1:num_var){
+  formula_str <- paste(dep_var, "~", indep_var[i],sep="")
+  lm_fit <- lm(as.formula(formula_str), ori_dat)
+  coeff <- summary(lm_fit)$coefficients
+  num <- nrow(coeff)
+  uni_assoc <- rbind(uni_assoc, data.frame(variable=indep_var[i], beta=round(coeff[num,1], 3),
+                                           se=round(coeff[num,2], 3), pval_linear=coeff[num, 4]))
+}
+head(uni_assoc)
+dim(uni_assoc)
+write.table(uni_assoc, paste(output, "Univariate_Linear_Association.csv", sep=""), quote=F, sep=",", row.names=F)
+
+
+#%*************************************************************************
+#\chapter{Variable selection with LASSO}
+#%*************************************************************************
+#remove variables with a single value & filter by p-value of logistic model
+dim(ori_dat)
+rm_var <- names(which(apply(ori_dat[indep_var], 2, function(x)
+  length(table(x))<=1)))
+rm_var
+length(rm_var)
+
+filter_assoc <- subset(uni_assoc, pval_linear>cut_pval)
+head(filter_assoc)
+with(filter_assoc, summary(pval_linear))
+filter_var <- as.character(filter_assoc$variable)
+rm_var <- unique(c(rm_var, filter_var))
+length(rm_var)
+
+keep_var <- indep_var[!(indep_var %in% rm_var)]
+(num_var <- length(keep_var))
+update_subdat <- ori_dat[c(keep_var, dep_var)]
+cc_dat <- as.matrix(update_subdat[complete.cases(update_subdat), ])
+dim(cc_dat)
+
+#LASSO using the full CC data
+if(boot_loo) n_fold <- nrow(cc_dat)
+cvfit <- cv.glmnet(cc_dat[, keep_var], y=cc_dat[, dep_var], alpha=1, nlambda=100, standardize=F, #alpha=1 for lasso
+                   family='gaussian', type.measure="mse", nfold=n_fold) #"deviance"
+cvfit
+cvfit$lambda.1se
+cvfit$lambda.min
+coef_min <- as.matrix(coef(cvfit, s = "lambda.min"))
+(select_min <- data.frame(coef_min[coef_min!=0,]))
+(dim(select_min))
+coef_1se <- as.matrix(coef(cvfit, s = "lambda.1se"))
+(select_1se <- data.frame(coef_1se[coef_1se!=0,]))
+(dim(select_1se))
+
+lambda.1se
+lambda.min
+select_min
+select_1se
+
+
+write.csv(select_min, "select_min.csv")
+write.csv(select_1se, "select_1se.csv")
+
+#cvfit$cvm				#mean CV error
+cvfit$nzero				#number of non-zero coefficients for each lambda
+full_fit <- cvfit$glmnet.fit		#glmnet object for the full data (not CV data)
+full_coef <- coef(full_fit)
+full_coef <- full_coef[-1, ncol(full_coef)]	#remove the intercept from the coefficient matrix
+full_coef <- full_coef[full_coef != 0]
+full_coef_result <- data.frame(full_coef)		#remove those varialbes with coefficient=0
+full_coef_result <- cbind(rownames(full_coef_result), full_coef_result)
+names(full_coef_result) <- c("selected_var", "coefficient")
+write.table(full_coef_result, paste(output, "Selected_Variables_using_entire_data.csv", sep=""), sep=",", row.names=F)
+
+
+
+#plot variable coefficients vs. shrinkage parameter lambda.
+pdf(paste(output,"Lasso_CV_full_data.pdf", sep=""))
+plot(cvfit)
+plot(full_fit, label=F, lwd=4)
+axis(4, at=full_coef, line=-0.5, label=names(full_coef), las=1, tick=F, cex.axis=0.6)
+grid()
+dev.off()
+
+#Bootstrapping + LASSO variable selection
+size <- nrow(cc_dat)
+select_lambda <- NULL
+var_hash <- hash()
+for(i in 1:boot_num){
+  bootstrap <- sample(1:size, replace=T)
+  (uni_ratio <- length(unique(bootstrap))/length(bootstrap))
+  bs_dat <- cc_dat[bootstrap, ]
+  dim(bs_dat)
+  
+  #choose lambda on each bootstrap sample
+  bs_cvfit <- cv.glmnet(bs_dat[, keep_var], y=bs_dat[, dep_var], alpha=1, nlambda=100, #alpha=1 for lasso
+                        family='gaussian', type.measure="mse", nfold=n_fold, standardize=F) #"deviance"
+  if(lambda_label == "min") {
+    select_lambda <- c(select_lambda, bs_cvfit$lambda.min)
+    coef_fit <- as.matrix(coef(bs_cvfit, s="lambda.min"))
+  } else if(lambda_label == "1se") {
+    select_lambda <- c(select_lambda, bs_cvfit$lambda.1se)
+    coef_fit <- as.matrix(coef(bs_cvfit, s="lambda.1se"))
+  }
+  (sign_nonzero <- sign(coef_fit[coef_fit!=0, ,drop=F]))
+  select_vars <- rownames(sign_nonzero)
+  for(j in 1:nrow(sign_nonzero)) {
+    var <- select_vars[j]
+    if(!has.key(var, var_hash)){
+      var_hash[var] <- sign_nonzero[j, 1]
+    }else {
+      var_hash[var] <- c(var_hash[[var]], sign_nonzero[j, 1])
+    }
+  }
+}
+stat_nonzero <- lapply(keys(var_hash), FUN=function(x) data.frame(x, table(var_hash[[x]])))
+stat_nonzero <- data.frame(do.call("rbind", stat_nonzero))
+names(stat_nonzero) <- c("variable", "sign", "count")
+stat_nonzero <- transform(stat_nonzero, frequency=round(count/boot_num, 4)*100, opposite=duplicated(variable))
+opp_vars <- stat_nonzero[stat_nonzero$opposite, "variable"]	#variable name with opposite effect direction
+stat_nonzero[stat_nonzero$variable %in% opp_vars, "opposite"] <- TRUE
+stat_nonzero <- stat_nonzero[order(stat_nonzero$frequency, decreasing=T),]	#sorting
+write.table(stat_nonzero, paste(output, paste("Lasso_IF_", lambda_label, boot_num,".csv", sep=""), sep=""),
+            quote=F, sep=",", row.names=F)
+
+#########
+
+select_min
+select_1se
