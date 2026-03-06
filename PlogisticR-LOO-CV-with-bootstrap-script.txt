@@ -27,7 +27,7 @@ indep_var <- paste("W", 1:61, sep="") #independent variables i.e. there are W1 t
 dep_var <- "dv"     #dependent variable
 case_grp <- c(1)		#case group
 ctrl_grp <- c(0)		#control group
-cut_pval <- 1			#cut-off of univariate logistic  p-value
+cut_pval <- 1			#cut-off of univariate wilcoxon or logistic  p-value dependable upon command below (see line 151)
 boot_num <- 1000		#number of bootstrap
 boot_loo <- TRUE		#perform LOO-CV in bootstrapping if TRUE, else perform "n_fold" CV if FALSE
 n_fold <- 5			#number of CV fold
@@ -148,7 +148,7 @@ write.table(uni_assoc, paste(output, "Univariate_Association.csv", sep=""), quot
 #%*************************************************************************
 #\chapter{Variable selection with LASSO}
 #%*************************************************************************
-#remove variables with only a few values & filter by p-value of Wilcoxon
+#remove variables with only a few values & filter by p-value of Wilcoxon (keep as pval_wilcoxon) or Logistic (change pval_wilcoxon to pval_logistic)
 dim(update_dat)
 rm_var <- names(which(apply(update_dat[indep_var], 2, function(x)
   length(table(x))<=1)))
@@ -262,4 +262,5 @@ write.table(stat_nonzero, paste(output, paste("Lasso_IF_", lambda_label, boot_nu
 save(list=ls(all=TRUE),file=paste(output, "miRNA_Analysis.RData"))
 
 select_min
+
 select_1se
